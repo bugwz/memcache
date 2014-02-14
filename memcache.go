@@ -18,6 +18,13 @@ type Connection struct {
 	buffered bufio.ReadWriter
 }
 
+type Result struct {
+	Key   string
+	Value []byte
+	Flags uint16
+	Cas   uint64
+}
+
 func Connect(address string) (conn *Connection, err error) {
 	var network string
 	if strings.Contains(address, "/") {
@@ -37,97 +44,96 @@ func newConnection(nc net.Conn) *Connection {
 	return &Connection{
 		conn: nc,
 		buffered: bufio.ReadWriter{
-			bufio.NewReader(nc),
-			bufio.NewWriter(nc),
+			Reader: bufio.NewReader(nc),
+			Writer: bufio.NewWriter(nc),
 		},
 	}
 }
 
-func (self *Connection) Close() {
-	self.conn.Close()
-	self.conn = nil
+func (mc *Connection) Close() {
+	mc.conn.Close()
+	mc.conn = nil
 }
 
-func (self *Connection) IsClosed() bool {
-	return self.conn == nil
+func (mc *Connection) IsClosed() bool {
+	return mc.conn == nil
 }
 
-func (self *Connection) Get(key string) (value []byte, flags uint16, err error) {
+func (mc *Connection) Get(keys ...string) (results []Result, err error) {
 	defer handleError(&err)
-	value, flags, _ = self.get("get", key)
+	results = mc.get("get", keys)
 	return
 }
 
-func (self *Connection) Gets(key string) (value []byte, flags uint16, cas uint64, err error) {
+func (mc *Connection) Gets(keys ...string) (results []Result, err error) {
 	defer handleError(&err)
-	value, flags, cas = self.get("gets", key)
+	results = mc.get("gets", keys)
 	return
 }
 
-func (self *Connection) Set(key string, flags uint16, timeout uint64, value []byte) (stored bool, err error) {
+func (mc *Connection) Set(key string, flags uint16, timeout uint64, value []byte) (stored bool, err error) {
 	defer handleError(&err)
-	return self.store("set", key, flags, timeout, value, 0), nil
+	return mc.store("set", key, flags, timeout, value, 0), nil
 }
 
-func (self *Connection) Add(key string, flags uint16, timeout uint64, value []byte) (stored bool, err error) {
+func (mc *Connection) Add(key string, flags uint16, timeout uint64, value []byte) (stored bool, err error) {
 	defer handleError(&err)
-	return self.store("add", key, flags, timeout, value, 0), nil
+	return mc.store("add", key, flags, timeout, value, 0), nil
 }
 
-func (self *Connection) Replace(key string, flags uint16, timeout uint64, value []byte) (stored bool, err error) {
+func (mc *Connection) Replace(key string, flags uint16, timeout uint64, value []byte) (stored bool, err error) {
 	defer handleError(&err)
-	return self.store("replace", key, flags, timeout, value, 0), nil
+	return mc.store("replace", key, flags, timeout, value, 0), nil
 }
 
-func (self *Connection) Append(key string, flags uint16, timeout uint64, value []byte) (stored bool, err error) {
+func (mc *Connection) Append(key string, flags uint16, timeout uint64, value []byte) (stored bool, err error) {
 	defer handleError(&err)
-	return self.store("append", key, flags, timeout, value, 0), nil
+	return mc.store("append", key, flags, timeout, value, 0), nil
 }
 
-func (self *Connection) Prepend(key string, flags uint16, timeout uint64, value []byte) (stored bool, err error) {
+func (mc *Connection) Prepend(key string, flags uint16, timeout uint64, value []byte) (stored bool, err error) {
 	defer handleError(&err)
-	return self.store("prepend", key, flags, timeout, value, 0), nil
+	return mc.store("prepend", key, flags, timeout, value, 0), nil
 }
 
-func (self *Connection) Cas(key string, flags uint16, timeout uint64, value []byte, cas uint64) (stored bool, err error) {
+func (mc *Connection) Cas(key string, flags uint16, timeout uint64, value []byte, cas uint64) (stored bool, err error) {
 	defer handleError(&err)
-	return self.store("cas", key, flags, timeout, value, cas), nil
+	return mc.store("cas", key, flags, timeout, value, cas), nil
 }
 
-func (self *Connection) Version() (version string, err error) {
-    defer handleError(&err)
-    self.writestrings("version\r\n")
-    reply := self.readline()
-    if strings.Contains(reply, "ERROR") {
-        panic(NewMemcacheError("Server error"))
-    }
-    if !strings.HasPrefix(reply, "VERSION ") {
-        panic(NewMemcacheError("%v", reply))
-    }
-    return strings.Split(reply, " ")[1], nil
-}
-
-func (self *Connection) Delete(key string) (deleted bool, err error) {
+func (mc *Connection) Delete(key string) (deleted bool, err error) {
 	defer handleError(&err)
 	// delete <key> [<time>] [noreply]\r\n
-	self.writestrings("delete ", key, "\r\n")
-	reply := self.readline()
+	mc.writestrings("delete ", key, "\r\n")
+	reply := mc.readline()
 	if strings.Contains(reply, "ERROR") {
 		panic(NewMemcacheError("Server error"))
 	}
 	return strings.HasPrefix(reply, "DELETED"), nil
 }
 
-func (self *Connection) Stats(argument string) (result []byte, err error) {
+//This purges the entire cache.
+func (mc *Connection) FlushAll() (err error) {
+	defer handleError(&err)
+	// flush_all [delay] [noreply]\r\n
+	mc.writestrings("flush_all\r\n")
+	response := mc.readline()
+	if !strings.Contains(response, "OK") {
+		panic(NewMemcacheError(fmt.Sprintf("Error in FlushAll %v", response)))
+	}
+	return nil
+}
+
+func (mc *Connection) Stats(argument string) (result []byte, err error) {
 	defer handleError(&err)
 	if argument == "" {
-		self.writestrings("stats\r\n")
+		mc.writestrings("stats\r\n")
 	} else {
-		self.writestrings("stats ", argument, "\r\n")
+		mc.writestrings("stats ", argument, "\r\n")
 	}
-	self.flush()
+	mc.flush()
 	for {
-		l := self.readline()
+		l := mc.readline()
 		if strings.HasPrefix(l, "END") {
 			break
 		}
@@ -140,105 +146,116 @@ func (self *Connection) Stats(argument string) (result []byte, err error) {
 	return result, err
 }
 
-func (self *Connection) get(command, key string) (value []byte, flags uint16, cas uint64) {
+func (mc *Connection) get(command string, keys []string) (results []Result) {
+	results = make([]Result, 0, len(keys))
+	if len(keys) == 0 {
+		return
+	}
 	// get(s) <key>*\r\n
-	self.writestrings(command, " ", key, "\r\n")
-	header := self.readline()
-	if strings.HasPrefix(header, "VALUE") {
+	mc.writestrings(command)
+	for _, key := range keys {
+		mc.writestrings(" ", key)
+	}
+	mc.writestrings("\r\n")
+	header := mc.readline()
+	var result Result
+	for strings.HasPrefix(header, "VALUE") {
 		// VALUE <key> <flags> <bytes> [<cas unique>]\r\n
 		chunks := strings.Split(header, " ")
 		if len(chunks) < 4 {
 			panic(NewMemcacheError("Malformed response: %s", string(header)))
 		}
+		result.Key = chunks[1]
 		flags64, err := strconv.ParseUint(chunks[2], 10, 16)
 		if err != nil {
 			panic(NewMemcacheError("%v", err))
 		}
-		flags = uint16(flags64)
+		result.Flags = uint16(flags64)
 		size, err := strconv.ParseUint(chunks[3], 10, 64)
 		if err != nil {
 			panic(NewMemcacheError("%v", err))
 		}
 		if len(chunks) == 5 {
-			cas, err = strconv.ParseUint(chunks[4], 10, 64)
+			result.Cas, err = strconv.ParseUint(chunks[4], 10, 64)
 			if err != nil {
 				panic(NewMemcacheError("%v", err))
 			}
 		}
 		// <data block>\r\n
-		value = self.read(int(size) + 2)[:size]
-		header = self.readline()
+		result.Value = mc.read(int(size) + 2)[:size]
+		results = append(results, result)
+		header = mc.readline()
 	}
 	if !strings.HasPrefix(header, "END") {
 		panic(NewMemcacheError("Malformed response: %s", string(header)))
 	}
-	return value, flags, cas
+	return
 }
 
-func (self *Connection) store(command, key string, flags uint16, timeout uint64, value []byte, cas uint64) (stored bool) {
+func (mc *Connection) store(command, key string, flags uint16, timeout uint64, value []byte, cas uint64) (stored bool) {
 	if len(value) > 1000000 {
 		return false
 	}
 
 	// <command name> <key> <flags> <exptime> <bytes> [noreply]\r\n
-	self.writestrings(command, " ", key, " ")
-	self.write(strconv.AppendUint(nil, uint64(flags), 10))
-	self.writestring(" ")
-	self.write(strconv.AppendUint(nil, timeout, 10))
-	self.writestring(" ")
-	self.write(strconv.AppendInt(nil, int64(len(value)), 10))
+	mc.writestrings(command, " ", key, " ")
+	mc.write(strconv.AppendUint(nil, uint64(flags), 10))
+	mc.writestring(" ")
+	mc.write(strconv.AppendUint(nil, timeout, 10))
+	mc.writestring(" ")
+	mc.write(strconv.AppendInt(nil, int64(len(value)), 10))
 	if cas != 0 {
-		self.writestring(" ")
-		self.write(strconv.AppendUint(nil, cas, 10))
+		mc.writestring(" ")
+		mc.write(strconv.AppendUint(nil, cas, 10))
 	}
-	self.writestring("\r\n")
+	mc.writestring("\r\n")
 	// <data block>\r\n
-	self.write(value)
-	self.writestring("\r\n")
-	reply := self.readline()
+	mc.write(value)
+	mc.writestring("\r\n")
+	reply := mc.readline()
 	if strings.Contains(reply, "ERROR") {
 		panic(NewMemcacheError("Server error"))
 	}
 	return strings.HasPrefix(reply, "STORED")
 }
 
-func (self *Connection) writestrings(strs ...string) {
+func (mc *Connection) writestrings(strs ...string) {
 	for _, s := range strs {
-		self.writestring(s)
+		mc.writestring(s)
 	}
 }
 
-func (self *Connection) writestring(s string) {
-	if _, err := self.buffered.WriteString(s); err != nil {
+func (mc *Connection) writestring(s string) {
+	if _, err := mc.buffered.WriteString(s); err != nil {
 		panic(NewMemcacheError("%s", err))
 	}
 }
 
-func (self *Connection) write(b []byte) {
-	if _, err := self.buffered.Write(b); err != nil {
+func (mc *Connection) write(b []byte) {
+	if _, err := mc.buffered.Write(b); err != nil {
 		panic(NewMemcacheError("%s", err))
 	}
 }
 
-func (self *Connection) flush() {
-	if err := self.buffered.Flush(); err != nil {
+func (mc *Connection) flush() {
+	if err := mc.buffered.Flush(); err != nil {
 		panic(NewMemcacheError("%s", err))
 	}
 }
 
-func (self *Connection) readline() string {
-	self.flush()
-	l, isPrefix, err := self.buffered.ReadLine()
+func (mc *Connection) readline() string {
+	mc.flush()
+	l, isPrefix, err := mc.buffered.ReadLine()
 	if isPrefix || err != nil {
 		panic(NewMemcacheError("Prefix: %v, %s", isPrefix, err))
 	}
 	return string(l)
 }
 
-func (self *Connection) read(count int) []byte {
-	self.flush()
+func (mc *Connection) read(count int) []byte {
+	mc.flush()
 	b := make([]byte, count)
-	if _, err := io.ReadFull(self.buffered, b); err != nil {
+	if _, err := io.ReadFull(mc.buffered, b); err != nil {
 		panic(NewMemcacheError("%s", err))
 	}
 	return b
@@ -252,8 +269,8 @@ func NewMemcacheError(format string, args ...interface{}) MemcacheError {
 	return MemcacheError{fmt.Sprintf(format, args...)}
 }
 
-func (self MemcacheError) Error() string {
-	return self.Message
+func (merr MemcacheError) Error() string {
+	return merr.Message
 }
 
 func handleError(err *error) {

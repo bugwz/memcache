@@ -6,38 +6,34 @@ package memcache
 
 import (
 	"os/exec"
+	"strings"
 	"testing"
 	"time"
 )
 
-const (
-    MemcVersion  = "1.4.15"
-    MemcSockPath = "/tmp/memc.sock"
-)
-
 func TestMemcache(t *testing.T) {
-	cmd := exec.Command("memcached", "-s", MemcSockPath)
+	cmd := exec.Command("memcached", "-s", "/tmp/vtocc_cache.sock")
 	if err := cmd.Start(); err != nil {
-		t.Errorf("Memcache start: %v", err)
-		return
+		if strings.Contains(err.Error(), "executable file not found in $PATH") {
+			t.Skipf("skipping: %v", err)
+		}
+		t.Fatalf("Memcache start: %v", err)
 	}
 	defer cmd.Process.Kill()
 	time.Sleep(time.Second)
 
-	c, err := Connect(MemcSockPath)
+	c, err := Connect("/tmp/vtocc_cache.sock")
 	if err != nil {
-		t.Errorf("Connect: %v", err)
-		return
+		t.Fatalf("Connect: %v", err)
 	}
 
 	// Set
 	stored, err := c.Set("Hello", 0, 0, []byte("world"))
 	if err != nil {
-		t.Errorf("Set: %v", err)
-		return
+		t.Fatalf("Set: %v", err)
 	}
 	if !stored {
-		t.Errorf("Expecting true, received %v", stored)
+		t.Errorf("want true, got %v", stored)
 	}
 	expect(t, c, "Hello", "world")
 
@@ -47,7 +43,7 @@ func TestMemcache(t *testing.T) {
 		t.Errorf("Add: %v", err)
 	}
 	if stored {
-		t.Errorf("Expecting false, received %v", stored)
+		t.Errorf("want false, got %v", stored)
 	}
 	expect(t, c, "Hello", "world")
 
@@ -57,7 +53,7 @@ func TestMemcache(t *testing.T) {
 		t.Errorf("Replace: %v", err)
 	}
 	if !stored {
-		t.Errorf("Expecting true, received %v", stored)
+		t.Errorf("want true, got %v", stored)
 	}
 	expect(t, c, "Hello", "World")
 
@@ -67,7 +63,7 @@ func TestMemcache(t *testing.T) {
 		t.Errorf("Append: %v", err)
 	}
 	if !stored {
-		t.Errorf("Expecting true, received %v", stored)
+		t.Errorf("want true, got %v", stored)
 	}
 	expect(t, c, "Hello", "World!")
 
@@ -77,7 +73,7 @@ func TestMemcache(t *testing.T) {
 		t.Errorf("Prepend: %v", err)
 	}
 	if !stored {
-		t.Errorf("Expecting true, received %v", stored)
+		t.Errorf("want true, got %v", stored)
 	}
 	expect(t, c, "Hello", "Hello, World!")
 
@@ -87,39 +83,36 @@ func TestMemcache(t *testing.T) {
 		t.Errorf("Delete: %v", err)
 	}
 	if !deleted {
-		t.Errorf("Expecting true, received %v", deleted)
+		t.Errorf("want true, got %v", deleted)
 	}
 	expect(t, c, "Hello", "")
 
 	// Flags
 	stored, err = c.Set("Hello", 0xFFFF, 0, []byte("world"))
 	if err != nil {
-		t.Errorf("Set: %v", err)
-		return
+		t.Fatalf("Set: %v", err)
 	}
 	if !stored {
-		t.Errorf("Expecting true, received %v", stored)
+		t.Errorf("want true, got %v", stored)
 	}
-	b, f, err := c.Get("Hello")
+	results, err := c.Get("Hello")
 	if err != nil {
-		t.Errorf("Get: %v", err)
-		return
+		t.Fatalf("Get: %v", err)
 	}
-	if f != 0xFFFF {
-		t.Errorf("Expecting 0xFFFF, Received %x", f)
+	if results[0].Flags != 0xFFFF {
+		t.Errorf("want 0xFFFF, got %x", results[0].Flags)
 	}
-	if string(b) != "world" {
-		t.Errorf("Expecting world, Received %s", b)
+	if string(results[0].Value) != "world" {
+		t.Errorf("want world, got %s", results[0].Value)
 	}
 
 	// timeout
 	stored, err = c.Set("Lost", 0, 1, []byte("World"))
 	if err != nil {
-		t.Errorf("Set: %v", err)
-		return
+		t.Fatalf("Set: %v", err)
 	}
 	if !stored {
-		t.Errorf("Expecting true, received %v", stored)
+		t.Errorf("want true, got %v", stored)
 	}
 	expect(t, c, "Lost", "World")
 	time.Sleep(2 * time.Second)
@@ -128,76 +121,147 @@ func TestMemcache(t *testing.T) {
 	// cas
 	stored, err = c.Set("Data", 0, 0, []byte("Set"))
 	if err != nil {
-		t.Errorf("Set: %v", err)
-		return
+		t.Fatalf("Set: %v", err)
 	}
 	if !stored {
-		t.Errorf("Expecting true, received %v", stored)
+		t.Errorf("want true, got %v", stored)
 	}
 	expect(t, c, "Data", "Set")
-	b, f, cas, err := c.Gets("Data")
+	results, err = c.Gets("Data")
 	if err != nil {
-		t.Errorf("Gets: %v", err)
-		return
+		t.Fatalf("Gets: %v", err)
 	}
+	cas := results[0].Cas
 	if cas == 0 {
-		t.Errorf("Expecting non-zero for cas")
+		t.Errorf("want non-zero for cas")
 	}
 	stored, err = c.Cas("Data", 0, 0, []byte("not set"), 12345)
 	if err != nil {
-		t.Errorf("Set: %v", err)
-		return
+		t.Fatalf("Set: %v", err)
 	}
 	if stored {
-		t.Errorf("Expecting false, received %v", stored)
+		t.Errorf("want false, got %v", stored)
 	}
 	expect(t, c, "Data", "Set")
 	stored, err = c.Cas("Data", 0, 0, []byte("Changed"), cas)
 	if err != nil {
-		t.Errorf("Set: %v", err)
-		return
-	} 
+		t.Fatalf("Set: %v", err)
+	}
 	expect(t, c, "Data", "Changed")
 	stored, err = c.Set("Data", 0, 0, []byte("Overwritten"))
 	if err != nil {
-		t.Errorf("Set: %v", err)
-		return
+		t.Fatalf("Set: %v", err)
 	}
 	if !stored {
-		t.Errorf("Expecting true, received %v", stored)
+		t.Errorf("want true, got %v", stored)
 	}
 	expect(t, c, "Data", "Overwritten")
 
 	// stats
-	_, err = c.Stats("")
+	var stats []byte
+	stats, err = c.Stats("")
 	if err != nil {
-		t.Errorf("Stats: %v", err)
-		return
+		t.Fatalf("Stats: %v", err)
+	}
+	statsStr := string(stats)
+	if !strings.Contains(statsStr, "STAT version ") {
+		t.Fatalf("want containing \"version\", got %v", statsStr)
+	}
+	// for manual inspection of stats with -v
+	t.Logf("Main stats:\n" + statsStr)
+
+	stats, err = c.Stats("slabs")
+	if err != nil {
+		t.Fatalf("Stats: %v", err)
+	}
+	statsStr = string(stats)
+	if !strings.Contains(statsStr, "STAT 1:chunk_size ") {
+		t.Fatalf("want containing \"chunk_size\", got %v", statsStr)
+	}
+	// for manual inspection of stats with -v
+	t.Logf("Slabs stats:\n" + string(stats))
+
+	stats, err = c.Stats("items")
+	if err != nil {
+		t.Fatalf("Stats: %v", err)
+	}
+	statsStr = string(stats)
+	if !strings.Contains(statsStr, "STAT items:1:number ") {
+		t.Fatalf("want containing \"number\", got %v", statsStr)
+	}
+	// for manual inspection of stats with -v
+	t.Logf("Items stats:\n" + string(stats))
+
+	// FlushAll
+	// Set
+	stored, err = c.Set("Flush", 0, 0, []byte("Test"))
+	if err != nil {
+		t.Errorf("Set: %v", err)
+	}
+	expect(t, c, "Flush", "Test")
+
+	err = c.FlushAll()
+	if err != nil {
+		t.Fatalf("FlushAll: err %v", err)
 	}
 
-	_, err = c.Stats("slabs")
+	results, err = c.Get("Flush")
 	if err != nil {
-		t.Errorf("Stats: %v", err)
-		return
+		t.Fatalf("Get: %v", err)
 	}
-	// version
-    v, err := c.Version()
-	if err != nil {
-        t.Errorf("Version: %v", err)
-        return
-    }
-    if v != MemcVersion {
-        t.Errorf("Version: %v", v)
-    }
+	if len(results) != 0 {
+		t.Fatalf("FlushAll failed")
+	}
+
+	// Multi
+	stored, _ = c.Set("key1", 0, 0, []byte("val1"))
+	stored, _ = c.Set("key2", 0, 0, []byte("val2"))
+
+	results, _ = c.Get("key1", "key2")
+	if len(results) != 2 {
+		t.Fatalf("want 2, gto %d", len(results))
+	}
+	if results[0].Key != "key1" {
+		t.Errorf("want key1, got %s", results[0].Key)
+	}
+	if string(results[0].Value) != "val1" {
+		t.Errorf("want val1, got %s", string(results[0].Value))
+	}
+	if results[1].Key != "key2" {
+		t.Errorf("want key2, got %s", results[0].Key)
+	}
+	if string(results[1].Value) != "val2" {
+		t.Errorf("want val2, got %s", string(results[1].Value))
+	}
+
+	results, _ = c.Gets("key1", "key3", "key2")
+	if len(results) != 2 {
+		t.Fatalf("want 2, gto %d", len(results))
+	}
+	if results[0].Key != "key1" {
+		t.Errorf("want key1, got %s", results[0].Key)
+	}
+	if string(results[0].Value) != "val1" {
+		t.Errorf("want val1, got %s", string(results[0].Value))
+	}
+	if results[1].Key != "key2" {
+		t.Errorf("want key2, got %s", results[0].Key)
+	}
+	if string(results[1].Value) != "val2" {
+		t.Errorf("want val2, got %s", string(results[1].Value))
+	}
 }
 
 func expect(t *testing.T, c *Connection, key, value string) {
-	b, _, err := c.Get(key)
+	results, err := c.Get(key)
 	if err != nil {
-		t.Errorf("Get: %v", err)
-		return
+		t.Fatalf("Get: %v", err)
 	}
-	if string(b) != value {
-		t.Errorf("Expecting %s, Received %s", value, b)
+	var got string
+	if len(results) != 0 {
+		got = string(results[0].Value)
+	}
+	if got != value {
+		t.Errorf("want %s, got %s", value, results[0].Value)
 	}
 }
